@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 
 # -------------------------------------------------------------------
-# Copyright 2016-2020 Hystax Inc
+# Copyright 2016-2021 Hystax Inc
 # All Rights Reserved
 #
 # NOTICE:  Hystax permits you to use this file in accordance
