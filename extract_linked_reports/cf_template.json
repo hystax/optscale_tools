@@ -1,0 +1,231 @@
+{
+  "Description": "OptScale Extract Linked Reports Lambda",
+  "Metadata": {
+    "AWS::CloudFormation::Interface": {
+      "ParameterGroups": [
+        {
+          "Label": {
+            "default": "Source Settings"
+          },
+          "Parameters": [
+            "SourceBucketName",
+            "SourceReportPathPrefix",
+            "SourceReportName",
+            "SourceAccessKeyID",
+            "SourceSecretAccessKey"
+          ]
+        },
+        {
+          "Label": {
+            "default": "Target Settings"
+          },
+          "Parameters": [
+            "TargetBucketName",
+            "TargetReportPathPrefix",
+            "TargetReportName",
+            "TargetAccessKeyID",
+            "TargetSecretAccessKey"
+          ]
+        },
+        {
+          "Label": {
+            "default": "Lambda Configuration"
+          },
+          "Parameters": [
+            "UsageAccountIDs",
+            "ScheduleExpression"
+          ]
+        }
+      ]
+    }
+  },
+  "Parameters": {
+    "SourceBucketName": {
+      "Type": "String",
+      "Description": "Source S3 bucket name where the root billing reports are stored. <BUCKET_NAME>/reports/report_name/..."
+    },
+    "SourceReportPathPrefix": {
+      "Type": "String",
+      "Description": "The path to the reports in the source bucket bucket_name/<PATH/TO/REPORTS>/report_name/..."
+    },
+    "SourceReportName": {
+      "Type": "String",
+      "Description": "Folder name which contains reports is the source bucket bucket_name/reports/<REPORT_NAME>/report_sub_folder/*.cvs.zip"
+    },
+    "TargetBucketName": {
+      "Type": "String",
+      "Description": "Target S3 bucket name where to put billing extracted freports. <BUCKET_NAME>/reports/report_name/..."
+    },
+    "TargetReportPathPrefix": {
+      "Type": "String",
+      "Description": "The path to the extracted reports in the target bucket bucket_name/<PATH/TO/REPORTS>/report_name/..."
+    },
+    "TargetReportName": {
+      "Type": "String",
+      "Description": "Folder name to which export reports is the target bucket bucket_name/reports/<REPORT_NAME>/report_sub_folder/*.cvs.zip"
+    },
+    "UsageAccountIDs": {
+      "Type": "String",
+      "Description": "Comma delimited list of ACCOUNT IDs which to extract from the root reports (e.g.: 044478323321,876292135824)"
+    },
+    "ScheduleExpression": {
+      "Type": "String",
+      "Default": "rate(60 minutes)",
+      "Description": "Schedule how often to extract new reports"
+    },
+    "SourceAccessKeyID": {
+      "Type": "String",
+      "NoEcho": true,
+      "Description": "AWS_ACCESS_KEY_ID for source S3 bucket"
+    },
+    "SourceSecretAccessKey": {
+      "Type": "String",
+      "NoEcho": true,
+      "Description": "AWS_SECRET_ACCESS_KEY for source S3 bucket"
+    },
+    "TargetAccessKeyID": {
+      "Type": "String",
+      "NoEcho": true,
+      "Description": "AWS_ACCESS_KEY_ID for target S3 bucket"
+    },
+    "TargetSecretAccessKey": {
+      "Type": "String",
+      "NoEcho": true,
+      "Description": "AWS_SECRET_ACCESS_KEY for target S3 bucket"
+    }
+  },
+  "Resources": {
+    "LinkedReportsExtractLambda": {
+      "Type": "AWS::Lambda::Function",
+      "Properties": {
+        "Handler": "extract_linked_reports.lambda_handler",
+        "Role": {
+          "Fn::GetAtt": [
+            "LambdaExecutionRole",
+            "Arn"
+          ]
+        },
+        "Code": {
+          "S3Bucket": {"Fn::Sub" : "optscale-tools-${AWS::Region}"},
+          "S3Key": "lambda-functions/extract_linked_reports.zip"
+        },
+        "Runtime": "python3.8",
+        "Timeout": 900,
+        "MemorySize": 256,
+        "Environment": {
+          "Variables": {
+            "source_bucket_name": {
+              "Ref": "SourceBucketName"
+            },
+            "source_report_path_prefix": {
+              "Ref": "SourceReportPathPrefix"
+            },
+            "source_report_name": {
+              "Ref": "SourceReportName"
+            },
+            "target_bucket_name": {
+              "Ref": "TargetBucketName"
+            },
+            "target_report_path_prefix": {
+              "Ref": "TargetReportPathPrefix"
+            },
+            "target_report_name": {
+              "Ref": "TargetReportName"
+            },
+            "usage_account_ids": {
+              "Ref": "UsageAccountIDs"
+            },
+            "source_access_key_id": {
+              "Ref": "SourceAccessKeyID"
+            },
+            "source_secret_access_key": {
+              "Ref": "SourceSecretAccessKey"
+            },
+            "target_access_key_id": {
+              "Ref": "TargetAccessKeyID"
+            },
+            "target_secret_access_key": {
+              "Ref": "TargetSecretAccessKey"
+            }
+          }
+        }
+      }
+    },
+    "LambdaExecutionRole": {
+      "Type": "AWS::IAM::Role",
+      "Properties": {
+        "AssumeRolePolicyDocument": {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Effect": "Allow",
+              "Principal": {
+                "Service": [
+                  "lambda.amazonaws.com"
+                ]
+              },
+              "Action": [
+                "sts:AssumeRole"
+              ]
+            }
+          ]
+        },
+        "Path": "/",
+        "Policies": [
+          {
+            "PolicyName": "root",
+            "PolicyDocument": {
+              "Version": "2012-10-17",
+              "Statement": [
+                {
+                  "Effect": "Allow",
+                  "Action": [
+                    "logs:*"
+                  ],
+                  "Resource": "arn:aws:logs:*:*:*"
+                }
+              ]
+            }
+          }
+        ]
+      }
+    },
+    "ScheduledRule": {
+      "Type": "AWS::Events::Rule",
+      "Properties": {
+        "Description": "ScheduledRule",
+        "ScheduleExpression": {
+          "Ref": "ScheduleExpression"
+        },
+        "State": "ENABLED",
+        "Targets": [
+          {
+            "Arn": {
+              "Fn::GetAtt": [
+                "LinkedReportsExtractLambda",
+                "Arn"
+              ]
+            },
+            "Id": "LinkerReportsTargetFunction"
+          }
+        ]
+      }
+    },
+    "PermissionForEventsToInvokeLambda": {
+      "Type": "AWS::Lambda::Permission",
+      "Properties": {
+        "FunctionName": {
+          "Ref": "LinkedReportsExtractLambda"
+        },
+        "Action": "lambda:InvokeFunction",
+        "Principal": "events.amazonaws.com",
+        "SourceArn": {
+          "Fn::GetAtt": [
+            "ScheduledRule",
+            "Arn"
+          ]
+        }
+      }
+    }
+  }
+}
