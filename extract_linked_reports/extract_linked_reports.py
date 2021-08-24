@@ -128,7 +128,6 @@ def main(source_bucket_name, source_report_path_prefix, source_report_name,
             LOG.info('Report is already processed as {}'.format(
                 target_relative_path))
 
-
 if __name__ == '__main__':
     logging.basicConfig(level=logging.INFO)
     parser = argparse.ArgumentParser(
@@ -164,3 +163,47 @@ if __name__ == '__main__':
 
     arguments = parser.parse_args()
     main(**vars(arguments))
+
+def lambda_handler(event, context):
+    not_set_list = []
+    def environ_get(key):
+        v = os.environ.get(key)
+        if not v:
+            not_set_list.append(key)
+        return v
+    source_bucket_name = environ_get("source_bucket_name")
+    source_report_path_prefix = environ_get("source_report_path_prefix")
+    source_report_name = environ_get("source_report_name")
+    target_bucket_name = environ_get("target_bucket_name")
+    target_report_path_prefix = environ_get("target_report_path_prefix")
+    target_report_name = environ_get("target_report_name")
+    usage_account_ids = environ_get("usage_account_ids")
+
+    source_access_key_id = environ_get("source_access_key_id")
+    source_secret_access_key = environ_get("source_secret_access_key")
+    target_access_key_id = environ_get("target_access_key_id")
+    target_secret_access_key = environ_get("target_secret_access_key")
+
+    if not_set_list:
+        return {
+            "statusCode": 400,
+            "message": f"The following parameters are not set: {not_set_list}"
+        }
+    main(
+        source_bucket_name=source_bucket_name,
+        source_report_path_prefix=source_report_path_prefix,
+        source_report_name=source_report_name,
+        target_bucket_name=target_bucket_name,
+        target_report_path_prefix=target_report_path_prefix,
+        target_report_name=target_report_name,
+        usage_account_ids=usage_account_ids,
+        source_access_key_id=source_access_key_id,
+        source_secret_access_key=source_secret_access_key,
+        target_access_key_id=target_access_key_id,
+        target_secret_access_key=target_secret_access_key,
+    )
+
+    return {
+        "statusCode": 200,
+        "message": "Done",
+    }
