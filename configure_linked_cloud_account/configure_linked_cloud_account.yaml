@@ -1,0 +1,162 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: OptScale Configure Linked Cloud Account Template
+Parameters: 
+  OrganizationId: 
+    Type: String
+    AllowedPattern: ".+"
+    Description: OptScale organization ID
+  AuthToken:
+    Type: String
+    AllowedPattern: ".+"
+    Description: OptScale Auth token
+  CloudAccountName: 
+    Type: String
+    AllowedPattern: ".+"
+    Description: Name for new OptScale cloud connection, will be shown on "Data Sources" page
+Resources:
+  OptScaleAwsUser:
+    Type: AWS::IAM::User
+    Properties: 
+      Policies: 
+        - PolicyName: OptScaleLinkedAccountPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+            - Sid: DescribeOperations
+              Effect: Allow
+              Action:
+              - ec2:Describe*
+              - cloudwatch:GetMetricStatistics
+              - cloudwatch:GetMetricData
+              Resource: "*"
+            - Sid: S3DiscoveryPolicies
+              Effect: Allow
+              Action:
+              - s3:GetBucketTagging
+              - s3:ListAllMyBuckets
+              - s3:GetBucketLocation
+              Resource: "*"
+  OptScaleAwsUserAccessKey:
+    Type: AWS::IAM::AccessKey
+    Properties:
+      UserName: !Ref OptScaleAwsUser
+  OptScaleCreateLinkedAccountLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      Handler: index.lambda_handler
+      Role:
+        Fn::GetAtt:
+          - LambdaExecutionRole
+          - Arn
+      Code:
+        ZipFile: |
+          import boto3
+          import cfnresponse
+          import json
+          import logging
+          import time
+          from botocore.exceptions import ClientError
+          from urllib import request
+          from urllib.error import HTTPError
+          
+          LOG = logging.getLogger(__name__)
+          LOG.setLevel(logging.INFO)
+
+          # Keep CloudFlare happy
+          USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:94.0) Gecko/20100101 Firefox/94.0'
+          
+          def send_request(method, url, data=None, headers=None):
+            if data is not None:
+              data = json.dumps(data).encode()
+            if headers is None:
+              headers = {}
+            if 'User-Agent' not in headers:
+              headers['User-Agent'] = USER_AGENT
+            req = request.Request(url, data=data, headers=headers, method=method)
+            with request.urlopen(req) as resp:
+              return json.loads(resp.read().decode())
+
+          def wait_for_credentials(key_id, secret):
+            sts = boto3.client('sts', aws_access_key_id=key_id, aws_secret_access_key=secret)
+            attempts = 50
+            while True:
+              try:
+                sts.get_caller_identity()
+                break
+              except ClientError:
+                if not attempts:
+                  raise
+              time.sleep(1)
+              attempts -= 1
+
+          def lambda_handler(event, context):
+            try:
+              if event['RequestType'] == 'Create':
+                props = event['ResourceProperties']
+                wait_for_credentials(props['AccessKeyId'], props['SecretAccessKey'])
+                send_request(
+                  method='POST',
+                  url='{}/restapi/v2/organizations/{}/cloud_accounts'.format(
+                    props['OptScaleUrl'], props['OrganizationId']),
+                  data={
+                    'name': props['CloudAccountName'],
+                    'type': 'aws_cnr',
+                    'config': {
+                      'linked': True,
+                      'access_key_id': props['AccessKeyId'],
+                      'secret_access_key': props['SecretAccessKey'],
+                    },
+                  },
+                  headers={
+                    'Authorization': 'Bearer {}'.format(props['AuthToken']),
+                  },
+                )
+              cfnresponse.send(event, context, cfnresponse.SUCCESS, {})
+            except Exception as exc:
+              logging.exception(exc)
+              if isinstance(exc, HTTPError):
+                resp_text = exc.read().decode()
+                logging.error('Request error response: %s', resp_text)
+                response_data = {"Data": str(resp_text)}
+              else:
+                response_data = {"Data": str(exc)}
+              cfnresponse.send(event, context, cfnresponse.FAILED, response_data)
+      Runtime: python3.9
+      Timeout: 60
+      MemorySize: 128
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Path: /
+      Policies:
+        - PolicyName: root
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: '*'
+  OptScaleCreateLinkedAccount:
+    Type: Custom::OptScaleCreateLinkedAccount
+    DependsOn: OptScaleAwsUserAccessKey
+    Properties:
+      ServiceToken: !GetAtt OptScaleCreateLinkedAccountLambda.Arn
+      Region: !Ref AWS::Region
+      OptScaleUrl: https://my.optscale.com
+      CloudAccountName: !Ref CloudAccountName
+      OrganizationId: !Ref OrganizationId
+      AuthToken: !Ref AuthToken
+      AccessKeyId: !Ref OptScaleAwsUserAccessKey
+      SecretAccessKey: !GetAtt OptScaleAwsUserAccessKey.SecretAccessKey
