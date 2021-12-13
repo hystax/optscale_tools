@@ -1,0 +1,331 @@
+Description: OptScale Extract Linked Reports Lambda
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: Source Settings
+        Parameters:
+          - SourceBucketName
+          - SourceReportPathPrefix
+          - SourceReportName
+          - SourceAccessKeyID
+          - SourceSecretAccessKey
+      - Label:
+          default: Target Settings
+        Parameters:
+          - TargetBucketName
+          - TargetReportPathPrefix
+          - TargetReportName
+          - TargetAccessKeyID
+          - TargetSecretAccessKey
+      - Label:
+          default: Lambda Configuration
+        Parameters:
+          - UsageAccountIDs
+          - ScheduleExpression
+Parameters:
+  SourceBucketName:
+    Type: String
+    AllowedPattern: ".+"
+    Description: |
+      Source S3 bucket name where the root billing reports are stored
+      (<BUCKET_NAME>/reports/report_name/...)
+  SourceReportPathPrefix:
+    Type: String
+    AllowedPattern: ".+"
+    Description: |
+      The path to the reports in the source bucket
+      (bucket_name/<PATH/TO/REPORTS>/report_name/...)
+  SourceReportName:
+    Type: String
+    AllowedPattern: ".+"
+    Description: |
+      Folder name which contains reports is the source bucket
+      (bucket_name/reports/<REPORT_NAME>/report_sub_folder/*.cvs.zip)
+  TargetBucketName:
+    Type: String
+    AllowedPattern: ".+"
+    Description: |
+      Target S3 bucket name where to put billing extracted freports.
+      (<BUCKET_NAME>/reports/report_name/...)
+  TargetReportPathPrefix:
+    Type: String
+    Description: |
+      The path to the extracted reports in the target bucket
+      (bucket_name/<PATH/TO/REPORTS>/report_name/...)
+  TargetReportName:
+    Type: String
+    AllowedPattern: ".+"
+    Description: |
+      Folder name to which export reports is the target bucket
+      (bucket_name/reports/<REPORT_NAME>/report_sub_folder/*.cvs.zip)
+  UsageAccountIDs:
+    Type: String
+    AllowedPattern: "[0-9,]+"
+    Description: |
+      Comma delimited list of ACCOUNT IDs which to extract from the root reports
+      (e.g.: 044478323321,876292135824)
+  ScheduleExpression:
+    Type: String
+    AllowedPattern: ".+"
+    Default: rate(60 minutes)
+    Description: Schedule how often to extract new reports
+Resources:
+  LinkedReportsExtractLambda:
+    Type: AWS::Lambda::Function
+    DependsOn: LinkedReportsExtractMountTarget
+    Properties:
+      Handler: index.lambda_handler
+      Role:
+        Fn::GetAtt:
+          - LambdaExecutionRole
+          - Arn
+      Code:
+        ZipFile: |
+          import csv
+          import logging
+          import os
+          import tempfile
+          import zipfile
+          import boto3
+          LOG = logging.getLogger(__name__)
+          LOG.setLevel(logging.INFO)
+          WORKING_DIR = '/mnt/efs'
+          
+          def str_to_set(input_str):
+            result = {s.strip() for s in input_str.split(',')}
+            result = {s for s in result if s}
+            return result
+          
+          def find_reports(bucket, path_prefix):
+            items = bucket.objects.filter(Prefix=path_prefix)
+            reports = {}
+            for item in items:
+              rel_path = item.key[len(path_prefix):]
+              if rel_path.endswith('.csv.zip'):
+                reports[rel_path] = item
+            return reports
+          
+          def extract_expenses(s_report_path, t_report_path, usage_account_ids):
+            with open(s_report_path, newline='') as s_f:
+              with open(t_report_path, 'w') as t_f:
+                reader = csv.DictReader(s_f)
+                if reader.fieldnames is None:
+                  LOG.warning('Source file {} appears to be empty'.format(source_report_path))
+                  return
+                writer = csv.DictWriter(t_f, reader.fieldnames)
+                s_lines = 0
+                t_lines = 0
+                writer.writeheader()
+                for row in reader:
+                  s_lines += 1
+                  if row['lineItem/UsageAccountId'] in usage_account_ids:
+                    writer.writerow(row)
+                    t_lines += 1
+                LOG.info('Found {} lines, removed {} lines, left {} lines'.format(s_lines, s_lines - t_lines, t_lines))
+          
+          def process_report(s_bucket, s_path, s_report_name, t_bucket, t_path, t_report_name, usage_account_ids):
+            with tempfile.TemporaryDirectory(dir=WORKING_DIR) as temp_dir:
+              zip_path = os.path.join(temp_dir, 'report.zip')
+              t_report_path = os.path.join(temp_dir, 'new_report.csv')
+              s_bucket.download_file(s_path, zip_path)
+              with zipfile.ZipFile(zip_path, 'r') as f:
+                if len(f.filelist) > 1:
+                  raise Exception('Too many files, expected one file')
+                f.extractall(temp_dir)
+                s_report_path = os.path.join(temp_dir, f.filelist[0].filename)
+              extract_expenses(s_report_path, t_report_path, usage_account_ids)
+              with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as f:
+                t_report_file = os.path.basename(s_report_path).replace(s_report_name, t_report_name, 1)
+                f.write(t_report_path, t_report_file)
+              t_bucket.upload_file(zip_path, t_path)
+          
+          def lambda_handler(event, context):
+            s3 = boto3.resource('s3')
+            s_report_path_prefix = os.environ["source_report_path_prefix"]
+            s_report_name = os.environ["source_report_name"]
+            t_report_path_prefix = os.environ["target_report_path_prefix"]
+            t_report_name = os.environ["target_report_name"]
+            usage_account_ids = str_to_set(os.environ["usage_account_ids"])
+            s_bucket = s3.Bucket(os.environ['source_bucket_name'])
+            t_bucket = s3.Bucket(os.environ['target_bucket_name'])
+            s_prefix = '{}/{}/'.format(s_report_path_prefix, s_report_name)
+            t_prefix = '{}/{}/'.format(t_report_path_prefix, t_report_name)
+            s_reports = find_reports(s_bucket, s_prefix)
+            t_reports = find_reports(t_bucket, t_prefix)
+            LOG.info('Found {} source reports and {} target reports'.format(len(s_reports), len(t_reports)))
+            for s_rel_path, s_report in s_reports.items():
+              t_rel_path = s_rel_path.replace(s_report_name, t_report_name, 1)
+              t_report = t_reports.get(t_rel_path)
+              LOG.info('Checking report {}'.format(s_rel_path))
+              if (not t_report or t_report.last_modified < s_report.last_modified):
+                LOG.info('Processing report {}'.format(s_rel_path))
+                s_path = s_report.key
+                t_path = t_prefix + t_rel_path
+                process_report(s_bucket, s_path, s_report_name, t_bucket, t_path, t_report_name, usage_account_ids)
+                LOG.info('Saved processed report as {}'.format(t_rel_path))
+              else:
+                LOG.info('Report is already processed as {}'.format(t_rel_path))
+            return {
+              "statusCode": 200,
+              "message": "Done",
+            }
+      Runtime: python3.9
+      Timeout: 900
+      MemorySize: 256
+      VpcConfig:
+        SecurityGroupIds:
+          - !GetAtt LinkedReportsExtractVPC.DefaultSecurityGroup
+        SubnetIds:
+          - !Ref LinkedReportsExtractSubnet
+      FileSystemConfigs:
+        - Arn: !GetAtt LinkedReportsExtractAccessPoint.Arn
+          LocalMountPath: "/mnt/efs"
+      Environment:
+        Variables:
+          source_bucket_name: !Ref SourceBucketName
+          source_report_path_prefix: !Ref SourceReportPathPrefix
+          source_report_name: !Ref SourceReportName
+          target_bucket_name: !Ref TargetBucketName
+          target_report_path_prefix: !Ref TargetReportPathPrefix
+          target_report_name: !Ref TargetReportName
+          usage_account_ids: !Ref UsageAccountIDs
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Path: /
+      Policies:
+        - PolicyName: root
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                  - ec2:CreateNetworkInterface
+                  - ec2:DescribeNetworkInterfaces
+                  - ec2:DeleteNetworkInterface
+                  - elasticfilesystem:ClientMount
+                  - elasticfilesystem:ClientRootAccess
+                  - elasticfilesystem:ClientWrite
+                  - elasticfilesystem:DescribeMountTargets
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                Resource: !Sub 'arn:aws:s3:::${SourceBucketName}/*'
+              - Effect: Allow
+                Action:
+                  - s3:ListBucket
+                Resource: !Sub 'arn:aws:s3:::${SourceBucketName}'
+              - Effect: Allow
+                Action:
+                  - s3:PutObject
+                Resource: !Sub 'arn:aws:s3:::${TargetBucketName}/*'
+              - Effect: Allow
+                Action:
+                  - s3:ListBucket
+                Resource: !Sub 'arn:aws:s3:::${TargetBucketName}'
+  ScheduledRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Description: ScheduledRule
+      ScheduleExpression:
+        Ref: ScheduleExpression
+      State: ENABLED
+      Targets:
+        - Arn:
+            Fn::GetAtt:
+              - LinkedReportsExtractLambda
+              - Arn
+          Id: LinkerReportsTargetFunction
+  PermissionForEventsToInvokeLambda:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName:
+        Ref: LinkedReportsExtractLambda
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn:
+        Fn::GetAtt:
+          - ScheduledRule
+          - Arn
+  LinkedReportsExtractVPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 172.31.0.0/16
+      EnableDnsHostnames: True
+      EnableDnsSupport: True  
+      Tags:
+        - Key: Name
+          Value: LinkedReportsExtractVPC
+  LinkedReportsExtractSubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      CidrBlock: 172.31.1.0/24
+      VpcId: !Ref LinkedReportsExtractVPC
+      Tags:
+        - Key: Name
+          Value: LinkedReportsExtractVPC
+  LinkedReportsExtractRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties: 
+      VpcId: !Ref LinkedReportsExtractVPC
+  LinkedReportsExtractRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties: 
+      RouteTableId: !Ref LinkedReportsExtractRouteTable
+      SubnetId: !Ref LinkedReportsExtractSubnet
+  LinkedReportsExtractS3Endpoint:
+    Type: 'AWS::EC2::VPCEndpoint'
+    Properties:
+      ServiceName: !Sub 'com.amazonaws.${AWS::Region}.s3'
+      VpcId: !Ref LinkedReportsExtractVPC
+      RouteTableIds:
+      - !Ref LinkedReportsExtractRouteTable
+  LinkedReportsExtractFileSystem:
+    Type: 'AWS::EFS::FileSystem'
+    Properties:
+      Encrypted: true
+      FileSystemTags:
+        - Key: Name
+          Value: LinkedReportsExtractFileSystem
+      FileSystemPolicy:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: "Allow"
+            Action:
+              - "elasticfilesystem:ClientMount"
+            Principal:
+              AWS: "*"
+  LinkedReportsExtractMountTarget:
+    Type: AWS::EFS::MountTarget
+    Properties:
+      FileSystemId: !Ref LinkedReportsExtractFileSystem
+      SubnetId: !Ref LinkedReportsExtractSubnet
+      SecurityGroups:
+      - !GetAtt LinkedReportsExtractVPC.DefaultSecurityGroup
+  LinkedReportsExtractAccessPoint:
+    Type: 'AWS::EFS::AccessPoint'
+    Properties:
+      FileSystemId: !Ref LinkedReportsExtractFileSystem
+      PosixUser:
+        Uid: "1000"
+        Gid: "1000"
+      RootDirectory:
+        CreationInfo:
+          OwnerGid: "1000"
+          OwnerUid: "1000"
+          Permissions: "0777"
+        Path: "/efs"
