@@ -11,6 +11,8 @@ This script:
 1. Make sure you have Python 3 and corresponding pip installed.
 2. Enter script directory and run `pip3 install -r requirements.txt` to install required Python packages.
 
+## Sample usage diagram
+![](linked_account_connection.drawio.svg)
 ## Usage example
 
 Take reports from `yv-report-bucket/reports/yv_report`, leave only entries belonging to `044478323321` and `876292135824` usage account IDs and save them to `yv-report-bucket/extracted-reports/yv_report` using the same credentials for source and target buckets.
